@@ -18,6 +18,7 @@ dependencies:
   - pip:
       - torch          # PyTorch - the framework that actually runs the model
       - transformers   # Hugging Face - gives us the Mixtral model + tokenizer
+      - sentencepiece  # Tokenizer backend the Mixtral tokenizer needs
       - accelerate     # Helper that places the model on CPU/GPU correctly
       - pyyaml         # Lets us read the config.yaml file
       - jupyter        # So we can run the notebook

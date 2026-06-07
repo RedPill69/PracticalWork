@@ -63,7 +63,7 @@ def load_model(cfg):
     tokenizer = AutoTokenizer.from_pretrained(cfg["model_id"])
     model = AutoModelForCausalLM.from_pretrained(
         cfg["model_id"],
-        torch_dtype=torch.float32,
+        dtype=torch.float32,  # standard precision; fine for the tiny model on CPU
     )
     model.to(device)
     model.eval()  # evaluation mode: we only run the model, we do not train it

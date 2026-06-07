@@ -3,8 +3,10 @@
 
 # Which model to load from the Hugging Face Hub.
 # This is a TINY test version of Mixtral (only a few MB) so it runs fast on a laptop.
+# It has the same Mixture-of-Experts structure as the real model but random weights,
+# so its predictions are meaningless - we only use it to check that the code runs.
 # Later we swap just this one line for the real "mistralai/Mixtral-8x7B-v0.1".
-model_id: hf-internal-testing/Mixtral-tiny
+model_id: hf-internal-testing/tiny-random-MixtralForCausalLM
 
 # The text we feed into the model for the test.
 prompt: "The capital of France is"
