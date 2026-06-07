@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+
+# Jupyter notebook checkpoints
+.ipynb_checkpoints/
+
+# Hugging Face model cache (can get large)
+hf_cache/
+.cache/
+
+# Local virtual envs (we use a named conda env, not a folder in the repo)
+.venv/
+env/

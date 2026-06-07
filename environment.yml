@@ -1,0 +1,24 @@
+# Conda environment for the Practical Work project.
+#
+# Create it once with:   conda env create -f environment.yml
+# Update it later with:  conda env update -f environment.yml --prune
+#
+# Keep this file in sync whenever we add a new dependency, so the env can be
+# rebuilt the same way on any machine (laptop, university server, ...).
+
+name: practical_work
+
+channels:
+  - conda-forge
+
+dependencies:
+  - python=3.11
+  - pip
+  # Everything below is installed via pip (simple, always recent wheels):
+  - pip:
+      - torch          # PyTorch - the framework that actually runs the model
+      - transformers   # Hugging Face - gives us the Mixtral model + tokenizer
+      - accelerate     # Helper that places the model on CPU/GPU correctly
+      - pyyaml         # Lets us read the config.yaml file
+      - jupyter        # So we can run the notebook
+      - ipykernel      # Connects this conda env to Jupyter as a kernel
