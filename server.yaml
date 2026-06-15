@@ -1,0 +1,34 @@
+# SERVER config: the real Mixtral-8x7B in 4-bit on a CUDA GPU (e.g. 1x A100 80GB).
+# This is the config for the actual Stage-1 benchmark run.
+#
+#   huggingface-cli download mistralai/Mixtral-8x7B-v0.1   # download once
+#   python run_eval.py --config server.yaml                # per-member sweep
+#   python analyze.py  --config server.yaml                # final answers
+
+seed: 0
+
+prompt: "The capital of France is"
+
+model:
+  model_id: mistralai/Mixtral-8x7B-v0.1
+  dtype: bfloat16
+  quantization: 4bit      # nf4 + double quant; ~24GB, fits one A100 80GB
+  device: auto            # device_map="auto" is used when quantized
+
+eval:
+  # Knowledge (MMLU), science MCQ (ARC), commonsense (HellaSwag).
+  tasks: [mmlu, arc_challenge, hellaswag]
+  # Applied to ALL tasks. 5 is a common choice; set per-task by running
+  # separate configs if you want MMLU-5 / others-0. Relative member loss does
+  # not depend on the exact shot count.
+  num_fewshot: 5
+  # Subset size per task, matched across all members. Start small to time one
+  # pass, then scale up (e.g. 1000, or a fraction like 0.5 for half the set).
+  limit: 1000
+  batch_size: 4
+  output_dir: results
+
+chat:
+  max_new_tokens: 200
+  temperature: 0.8
+  do_sample: true

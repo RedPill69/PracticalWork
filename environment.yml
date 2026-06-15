@@ -20,6 +20,9 @@ dependencies:
       - transformers   # Hugging Face - gives us the Mixtral model + tokenizer
       - sentencepiece  # Tokenizer backend the Mixtral tokenizer needs
       - accelerate     # Helper that places the model on CPU/GPU correctly
-      - pyyaml         # Lets us read the config.yaml file
+      - bitsandbytes   # 4-bit quantization for the real Mixtral (GPU only)
+      - lm-eval        # EleutherAI eval harness - the benchmark accuracy
+      - datasets       # benchmark data (pulled in by lm-eval too)
+      - pyyaml         # Lets us read the YAML config files
       - jupyter        # So we can run the notebook
       - ipykernel      # Connects this conda env to Jupyter as a kernel

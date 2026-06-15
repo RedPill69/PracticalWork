@@ -1,0 +1,31 @@
+# LOCAL config: tiny Mixtral on CPU, for fast development and smoke tests.
+# Everything here runs on a laptop in seconds. The numbers are meaningless
+# (the tiny model has random weights) - this config is only for checking that
+# the code runs. The real run uses server.yaml.
+#
+# Pick a config with --config, e.g.:  python run_eval.py --config local.yaml
+
+seed: 0
+
+# Prompt used by the sanity check / routing check.
+prompt: "The capital of France is"
+
+model:
+  # Tiny test version of Mixtral (a few MB, random weights, same structure).
+  model_id: hf-internal-testing/tiny-random-MixtralForCausalLM
+  dtype: float32          # standard precision; fine on CPU
+  quantization: none      # none | 4bit  (4bit needs a CUDA GPU)
+  device: auto            # auto | cpu | cuda
+
+eval:
+  # Short task + tiny limit so the whole pipeline runs in seconds locally.
+  tasks: [hellaswag]
+  num_fewshot: 0          # applied to all tasks (0 keeps prompts short for tiny)
+  limit: 5                # number of examples per task (matched across members)
+  batch_size: 1
+  output_dir: results
+
+chat:
+  max_new_tokens: 40
+  temperature: 0.8
+  do_sample: true

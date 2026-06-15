@@ -9,6 +9,9 @@ __pycache__/
 hf_cache/
 .cache/
 
+# Benchmark outputs written by run_eval.py / analyze.py
+results/
+
 # Local virtual envs (we use a named conda env, not a folder in the repo)
 .venv/
 env/

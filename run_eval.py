@@ -1,0 +1,116 @@
+"""
+run_eval.py
+
+Stage-1 benchmark, part 1 of 2: run the accuracy evaluation once per ensemble
+member and save the raw results to disk. Part 2 (analyze.py) turns those results
+into the accuracy table and the uncertainty decomposition.
+
+We use the standard lm-evaluation-harness for the accuracy itself (correct task
+protocols, comparable numbers), and just plug each member in by swapping the
+router before the run. The same model object is reused for every member - we only
+change its routing - so no weights are reloaded.
+
+Run it from the Code folder with:
+
+    python run_eval.py                    # tiny model, tiny limit (local.yaml)
+    python run_eval.py --config server.yaml   # the real Mixtral run on a GPU
+
+Output: one JSON file per member in cfg["eval"]["output_dir"], plus a
+members.json manifest. log_samples is on, so each file contains the per-document
+per-choice log-likelihoods we need for the uncertainty math.
+"""
+
+import os
+import json
+
+import lm_eval
+from lm_eval.models.huggingface import HFLM
+
+from sanity_check import load_config, config_arg, set_seed, load_model
+from routing import (
+    set_member,
+    restore,
+    topk_member,
+    rank_shift_member,
+    random_member,
+)
+
+
+def build_members(model):
+    """
+    The ensemble member set. Each value is the argument to set_member (or None for
+    the unmodified baseline). `role` drives the analysis: only "principled" members
+    form the ensemble for the uncertainty decomposition; "control" is the random
+    baseline; "baseline" is the reference for the accuracy loss.
+    """
+    return {
+        "top2_baseline": {"member": None,                      "role": "baseline"},
+        "top3":          {"member": topk_member(3),            "role": "principled"},
+        "rank_2_3":      {"member": rank_shift_member(1, 2),   "role": "principled"},
+        "rank_3_4":      {"member": rank_shift_member(2, 2),   "role": "principled"},
+        "random_k2":     {"member": random_member(model, 2, 0), "role": "control"},
+    }
+
+
+def evaluate_member(model, tokenizer, ecfg):
+    """Run lm-eval for the currently-applied member and return its result dict."""
+    lm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=ecfg["batch_size"])
+    return lm_eval.simple_evaluate(
+        model=lm,
+        tasks=list(ecfg["tasks"]),
+        num_fewshot=ecfg["num_fewshot"],
+        limit=ecfg["limit"],
+        log_samples=True,     # we need the per-doc per-choice log-likelihoods
+        bootstrap_iters=0,    # we compute our own confidence intervals in analyze.py
+    )
+
+
+def main():
+    config_path = config_arg()
+    cfg = load_config(config_path)
+    set_seed(cfg["seed"])
+    ecfg = cfg["eval"]
+    out_dir = ecfg["output_dir"]
+    os.makedirs(out_dir, exist_ok=True)
+
+    tokenizer, model, _ = load_model(cfg)
+    members = build_members(model)
+
+    # Manifest so analyze.py knows the members, their roles, and the run settings.
+    manifest = {
+        "model_id": cfg["model"]["model_id"],
+        "tasks": list(ecfg["tasks"]),
+        "num_fewshot": ecfg["num_fewshot"],
+        "limit": ecfg["limit"],
+        "members": {name: spec["role"] for name, spec in members.items()},
+    }
+    with open(os.path.join(out_dir, "members.json"), "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+
+    for name, spec in members.items():
+        print(f"\n=== Evaluating member: {name} ({spec['role']}) ===")
+        if spec["member"] is not None:
+            set_member(model, spec["member"])
+        try:
+            results = evaluate_member(model, tokenizer, ecfg)
+        finally:
+            restore(model)   # always return to the clean model, even on error
+
+        path = os.path.join(out_dir, f"eval_{name}.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(
+                {"results": results["results"], "samples": results["samples"]},
+                f, default=str,   # samples hold numbers/strings; default=str is a safety net
+            )
+        # Quick look at the headline metrics for this member.
+        for task, metrics in results["results"].items():
+            accs = {k: round(v, 4) for k, v in metrics.items()
+                    if isinstance(v, float) and ("acc" in k)}
+            print(f"  {task}: {accs}")
+        print(f"  saved -> {path}")
+
+    print(f"\nDone. Now run:  python analyze.py --config {config_path}")
+
+
+if __name__ == "__main__":
+    main()

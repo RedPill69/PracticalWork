@@ -24,7 +24,7 @@ Run it from the Code folder with:
 
 import torch
 
-from sanity_check import load_config, set_seed, load_model
+from sanity_check import load_config, config_arg, set_seed, load_model
 from routing import (
     set_member,
     restore,
@@ -51,10 +51,10 @@ def routing_log(model, inputs):
 
 
 def main():
-    cfg = load_config()
+    cfg = load_config(config_arg())
     set_seed(cfg["seed"])
     tokenizer, model, device = load_model(cfg)
-    inputs = tokenizer(cfg["prompt"], return_tensors="pt").to(device)
+    inputs = tokenizer(cfg["prompt"], return_tensors="pt").to(model.device)
 
     results = []  # (name, ok) per check
 
