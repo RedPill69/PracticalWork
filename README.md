@@ -93,16 +93,25 @@ answered later from the same saved files.
 
 ## Running the real model on a GPU
 
+The model is not gated - no access request needed.
+
 ```bash
 huggingface-cli download mistralai/Mixtral-8x7B-v0.1      # download once (~90GB)
-python run_eval.py --config server.yaml                   # 4-bit load + per-member sweep
-python analyze.py  --config server.yaml                   # final Stage-1 answers
+
+# Smoke run first (tiny limit) to confirm the 4-bit load + routing work on the GPU:
+python run_eval.py --config server.yaml --limit 2
+python analyze.py  --config server.yaml
+
+# Then scale up: edit eval.limit in server.yaml (or drop --limit) and re-run.
+python run_eval.py --config server.yaml
+python analyze.py  --config server.yaml
 ```
 
 The 4-bit path (`quantization: 4bit`) uses bitsandbytes nf4 + `device_map="auto"` and
 fits on one A100 80GB. **It can only be tested on a CUDA GPU** - locally we verify
 everything else (routing, the lm-eval integration, the analysis) on the tiny model.
-Start with a small `eval.limit` to time one pass, then scale up.
+Note `eval.limit` is **per (sub)task**, so for MMLU it is per subject x 57 - set it
+deliberately. `analyze.py` aggregates MMLU's subtasks into one `mmlu` line.
 
 ## Notebook
 

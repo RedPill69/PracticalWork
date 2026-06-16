@@ -105,37 +105,44 @@ def bootstrap_ci(correct_flags, iters=2000, seed=0):
 
 
 # --- main ------------------------------------------------------------------
+#
+# lm-eval reports a "group" task like MMLU as 57 separate leaf tasks
+# (mmlu_abstract_algebra, ...). We aggregate the leaves back into the task the
+# manifest asked for, so MMLU shows as one line, not 57. A leaf belongs to a
+# requested task `g` if it equals `g` or starts with `g + "_"`.
 
-def tasks_in(runs):
-    """All leaf task names that appear in the saved samples, plus 'overall'."""
-    tasks = set()
+
+def all_leaf_tasks(runs):
+    """Every leaf task name that appears in any member's saved samples."""
+    leaves = set()
     for run in runs.values():
-        tasks.update(run["samples"].keys())
-    return sorted(tasks)
+        leaves.update(run["samples"].keys())
+    return sorted(leaves)
 
 
-def member_correct(run, task):
-    """0/1 correctness per doc for one member on one task ('overall' = pooled)."""
-    if task == "overall":
-        flags = []
-        for t in run["samples"]:
+def leaves_for(group, leaves):
+    """The leaf tasks belonging to a requested task/group."""
+    return [t for t in leaves if t == group or t.startswith(group + "_")]
+
+
+def member_correct(run, leaves):
+    """0/1 correctness per doc for one member, pooled over the given leaf tasks."""
+    flags = []
+    for t in leaves:
+        if t in run["samples"]:
             _, c = per_doc(run["samples"][t])
             flags.extend(c.values())
-        return flags
-    _, c = per_doc(run["samples"][task])
-    return list(c.values())
+    return flags
 
 
-def member_dists(run, task):
-    """doc_id -> distribution for one member on one task ('overall' = pooled)."""
-    if task == "overall":
-        out = {}
-        for t in run["samples"]:
+def member_dists(run, leaves):
+    """doc -> distribution for one member, pooled over the given leaf tasks."""
+    out = {}
+    for t in leaves:
+        if t in run["samples"]:
             d, _ = per_doc(run["samples"][t])
             out.update({f"{t}:{k}": v for k, v in d.items()})
-        return out
-    d, _ = per_doc(run["samples"][task])
-    return d
+    return out
 
 
 def main():
@@ -151,18 +158,22 @@ def main():
     # Show members in manifest order (baseline first), not filesystem order.
     members = [m for m in roles if m in runs] + [m for m in runs if m not in roles]
 
-    tasks = tasks_in(runs)
-    if len(tasks) > 1:
-        tasks = tasks + ["overall"]
+    # Iterate the tasks the manifest asked for (MMLU's subtasks aggregated into
+    # one "mmlu"), plus a pooled "overall" when there is more than one task.
+    leaves = all_leaf_tasks(runs)
+    groups = [(g, leaves_for(g, leaves)) for g in manifest["tasks"]]
+    groups = [(g, lv) for g, lv in groups if lv]   # keep only tasks that ran
+    if len(groups) > 1:
+        groups.append(("overall", leaves))
 
     summary = {}
-    for task in tasks:
+    for task, task_leaves in groups:
         print(f"\n=== {task} ===")
 
         # Accuracy + bootstrap CI per member, and loss vs baseline.
         acc, ci = {}, {}
         for name in members:
-            flags = member_correct(runs[name], task)
+            flags = member_correct(runs[name], task_leaves)
             acc[name] = float(np.mean(flags)) if flags else float("nan")
             ci[name] = bootstrap_ci(flags)
 
@@ -185,7 +196,7 @@ def main():
         # Uncertainty decomposition over the principled members.
         unc = None
         if len(principled) >= 2:
-            dists_by_member = {m: member_dists(runs[m], task) for m in principled}
+            dists_by_member = {m: member_dists(runs[m], task_leaves) for m in principled}
             common = set.intersection(*(set(d) for d in dists_by_member.values()))
             doc_dists = [{m: dists_by_member[m][doc] for m in principled}
                          for doc in sorted(common)]

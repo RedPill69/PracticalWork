@@ -22,11 +22,12 @@ per-choice log-likelihoods we need for the uncertainty math.
 
 import os
 import json
+import argparse
 
 import lm_eval
 from lm_eval.models.huggingface import HFLM
 
-from sanity_check import load_config, config_arg, set_seed, load_model
+from sanity_check import load_config, set_seed, load_model
 from routing import (
     set_member,
     restore,
@@ -65,11 +66,24 @@ def evaluate_member(model, tokenizer, ecfg):
     )
 
 
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument("--config", default="local.yaml", help="path to a YAML config")
+    p.add_argument("--limit", type=int, default=None,
+                   help="override eval.limit; use a tiny value for a GPU smoke run, "
+                        "e.g. --config server.yaml --limit 2")
+    return p.parse_args()
+
+
 def main():
-    config_path = config_arg()
+    args = parse_args()
+    config_path = args.config
     cfg = load_config(config_path)
     set_seed(cfg["seed"])
     ecfg = cfg["eval"]
+    if args.limit is not None:
+        ecfg["limit"] = args.limit
+        print(f"(smoke run: eval.limit overridden to {args.limit})")
     out_dir = ecfg["output_dir"]
     os.makedirs(out_dir, exist_ok=True)
 
