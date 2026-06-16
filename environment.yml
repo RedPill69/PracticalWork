@@ -17,7 +17,11 @@ dependencies:
   # Everything below is installed via pip (simple, always recent wheels):
   - pip:
       - torch          # PyTorch - the framework that actually runs the model
-      - transformers   # Hugging Face - gives us the Mixtral model + tokenizer
+      # Pinned to the last 4.x: transformers 5.x stores Mixtral's experts as a
+      # fused 3D parameter, which bitsandbytes cannot 4-bit quantize (only
+      # nn.Linear). 4.x keeps the experts as separate nn.Linear, so the 4-bit
+      # load works on one GPU, and routing.py intervenes on that 4.x structure.
+      - transformers==4.57.6   # Hugging Face - gives us the Mixtral model + tokenizer
       - sentencepiece  # Tokenizer backend the Mixtral tokenizer needs
       - accelerate     # Helper that places the model on CPU/GPU correctly
       - bitsandbytes   # 4-bit quantization for the real Mixtral (GPU only)

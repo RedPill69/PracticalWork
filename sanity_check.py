@@ -99,11 +99,9 @@ def load_model(cfg):
         model = AutoModelForCausalLM.from_pretrained(
             mcfg["model_id"],
             quantization_config=bnb,
-            # Pin the whole model to GPU 0. The 4-bit model (~24GB) fits one 48GB+
-            # card with room to spare, but device_map="auto" miscounts the many MoE
-            # expert submodules and tries to offload some to CPU/disk (which bnb 4-bit
-            # forbids). {"": 0} forces everything onto the GPU. For a true multi-GPU
-            # split, switch this back to "auto".
+            # Pin the whole model to GPU 0: the 4-bit model (~24GB) fits one 48GB
+            # card with room to spare, so we keep it all on one device. For a true
+            # multi-GPU split, switch this to "auto".
             device_map={"": 0},
         )
     else:

@@ -6,19 +6,24 @@ changing which experts the router picks - without copying weights or retraining.
 
 Background (how Mixtral routes):
   Each decoder layer has a Mixture-of-Experts block. For every token, a small
-  linear layer (the "gate"/router) scores all experts, keeps the top 2, runs a
-  softmax over those 2 scores, and the layer output is the weighted sum of the
+  linear layer (the "gate") scores all experts, the block keeps the top 2, runs
+  a softmax over those 2 scores, and the layer output is the weighted sum of the
   2 chosen expert FFNs.
 
 What we do here:
   A "member" of our ensemble = the same model run with a fixed RULE ("policy")
-  for which experts each layer uses. We swap the router for a `MemberRouter`
-  that applies the policy and recomputes the softmax weights over ONLY the
-  chosen experts so they still sum to 1.
+  for which experts each layer uses. We wrap the layer's gate in a `MemberGate`
+  that MASKS the gate logits, and we set the block's `top_k`, so the block's own
+  selection (softmax -> topk -> renormalize) ends up choosing exactly the experts
+  our policy wants. We do NOT touch the expert FFNs, so 4-bit quantized experts
+  keep working untouched.
 
-  That last point is the "Option A" renormalization from the project notes:
-  if we keep a single expert its weight becomes 1.0 (NOT the old ~0.5 top-2
+  Because the block renormalizes the softmax over only the chosen experts, the
+  weights still sum to 1 - the "Option A" renormalization from the project notes:
+  if a single expert is kept its weight becomes 1.0 (NOT the old ~0.5 top-2
   weight), so the FFN contribution is not silently halved across all layers.
+  Masking the unchosen logits to -inf and letting the block renormalize is
+  algebraically identical to softmax-over-all-then-renormalize-the-chosen.
 
 The policies (one per member type in the plan):
   - "topk"       : per token, take the gate's k highest-ranked experts.
@@ -32,41 +37,38 @@ The policies (one per member type in the plan):
 
 Top-2 (the baseline) needs no override at all - just run the unmodified model.
 
-In this transformers version the routing decision lives in the router submodule
-`MixtralTopKRouter`, NOT in `MixtralSparseMoeBlock.forward` - so the router is
-exactly where we intervene.
+In this transformers version (4.x) the routing decision lives INSIDE
+`MixtralSparseMoeBlock.forward` (gate -> softmax -> topk -> renormalize), and the
+gate itself is a plain `nn.Linear`. So we intervene on the gate (mask its logits)
+and on the block's `top_k`, not on a separate router module.
 """
 
 import random
 
 import torch
-import torch.nn.functional as F
-from transformers.models.mixtral.modeling_mixtral import MixtralTopKRouter
+from torch import nn
 
 # The MoE block class name we look for when walking the model.
 MOE_BLOCK_NAME = "MixtralSparseMoeBlock"
 
+NEG_INF = float("-inf")
 
-class MemberRouter(MixtralTopKRouter):
+
+class MemberGate(nn.Module):
     """
-    A drop-in replacement for Mixtral's router that applies one of our routing
-    POLICIES instead of taking the natural top-2.
+    A drop-in replacement for a layer's gate (`nn.Linear`) that returns the SAME
+    logits with some entries masked to -inf, so the MoE block's own top-k lands
+    on the experts our policy wants.
 
-    Built from the layer's existing gate so it reuses the SAME trained weight
-    (we never create new random router weights).
+    Reuses the layer's existing gate, so it shares the SAME trained weight
+    (we never create new random gate weights). Pair it with the right `top_k` on
+    the block (see `set_member`).
     """
 
-    def __init__(self, gate, policy):
-        # Deliberately skip MixtralTopKRouter.__init__: it would allocate a
-        # fresh random weight. We only set up plain nn.Module bookkeeping and
-        # then reuse the trained pieces from the existing gate.
-        torch.nn.Module.__init__(self)
-
-        self.top_k = gate.top_k
-        self.num_experts = gate.num_experts
-        self.hidden_dim = gate.hidden_dim
-        self.weight = gate.weight  # share the SAME trained parameter, no copy
-
+    def __init__(self, gate, policy, num_experts):
+        super().__init__()
+        self.gate = gate  # the original nn.Linear, shared (no copy)
+        self.num_experts = num_experts
         self.kind = policy["kind"]
 
         if self.kind in ("topk", "rank_shift"):
@@ -82,40 +84,41 @@ class MemberRouter(MixtralTopKRouter):
             raise ValueError(f"unknown policy kind: {self.kind!r}")
 
     def forward(self, hidden_states):
-        # Score every expert exactly like the original router does.
-        hidden_states = hidden_states.reshape(-1, self.hidden_dim)
-        router_logits = F.linear(hidden_states, self.weight)  # (seq_len, num_experts)
-        router_probs = torch.softmax(router_logits.float(), dim=-1)
-        seq_len = router_probs.shape[0]
+        # Same scoring as the original gate. The block already reshaped
+        # hidden_states to (num_tokens, hidden_dim) before calling us.
+        logits = self.gate(hidden_states)  # (num_tokens, num_experts)
 
         if self.kind == "topk":
-            # Per token, the k experts with the highest probability.
-            chosen, router_indices = router_probs.topk(self.k, dim=-1)  # (seq_len, k)
+            # No masking: the block's topk with top_k=k picks the k best.
+            return logits
 
-        elif self.kind == "rank_shift":
-            # Per token, sort experts by probability (highest first) and take a
-            # window of length k starting at rank `start` (0-indexed). start=1
-            # skips each token's single best expert.
-            order = torch.argsort(router_probs, dim=-1, descending=True)  # (seq_len, E)
-            router_indices = order[:, self.start : self.start + self.k]   # (seq_len, k)
-            chosen = router_probs.gather(-1, router_indices)              # (seq_len, k)
+        if self.kind == "rank_shift":
+            # Mask each token's top `start` experts to -inf, so the block's topk
+            # (with top_k=k) lands on ranks [start, start+k).
+            if self.start > 0:
+                order = torch.argsort(logits, dim=-1, descending=True)
+                drop = order[:, : self.start]              # (num_tokens, start)
+                logits = logits.clone()
+                logits.scatter_(-1, drop, NEG_INF)
+            return logits
 
-        else:  # "fixed": same experts for every token in this layer
-            idx = self.forced_experts.to(router_probs.device)
-            router_indices = idx.unsqueeze(0).expand(seq_len, -1)  # (seq_len, k')
-            chosen = router_probs[:, idx]                          # (seq_len, k')
-
-        # Keep only the chosen experts' probabilities and renormalize so they
-        # sum to 1 (Option A). This is the single line everything hinges on.
-        router_scores = chosen / chosen.sum(dim=-1, keepdim=True)
-
-        # Same (logits, scores, indices) contract the MoE block expects.
-        return router_logits, router_scores, router_indices
+        # "fixed": keep only the forced experts, mask everything else to -inf.
+        idx = self.forced_experts.to(logits.device)
+        masked = torch.full_like(logits, NEG_INF)
+        masked[:, idx] = logits[:, idx]
+        return masked
 
 
 def get_moe_blocks(model):
     """Return the MoE blocks in order, one per decoder layer."""
     return [m for m in model.modules() if type(m).__name__ == MOE_BLOCK_NAME]
+
+
+def _policy_top_k(policy):
+    """How many experts per token this policy keeps (the block's `top_k`)."""
+    if policy["kind"] in ("topk", "rank_shift"):
+        return policy["k"]
+    return len(policy["experts"])  # "fixed"
 
 
 def _expand_member(member, n_layers):
@@ -149,24 +152,28 @@ def set_member(model, member):
       - set_member(model, random_member(model, 2))   # random-expert control
       - set_member(model, [[1], [3]])                # explicit, for debugging
 
-    We keep each original gate on the block (`block._original_gate`) so the
-    model can be restored later with `restore(model)`.
+    We keep each original gate and top_k on the block (`block._original_gate`,
+    `block._original_top_k`) so the model can be restored with `restore(model)`.
     """
     blocks = get_moe_blocks(model)
     policies = _expand_member(member, len(blocks))
 
     for block, policy in zip(blocks, policies):
         if not hasattr(block, "_original_gate"):
-            block._original_gate = block.gate  # remember the real router once
-        block.gate = MemberRouter(block._original_gate, policy)
+            block._original_gate = block.gate          # remember the real gate
+            block._original_top_k = block.top_k        # ...and its top_k, once
+        block.gate = MemberGate(block._original_gate, policy, block.num_experts)
+        block.top_k = _policy_top_k(policy)
 
 
 def restore(model):
-    """Undo `set_member`: put every original router back."""
+    """Undo `set_member`: put every original gate and top_k back."""
     for block in get_moe_blocks(model):
         if hasattr(block, "_original_gate"):
             block.gate = block._original_gate
+            block.top_k = block._original_top_k
             del block._original_gate
+            del block._original_top_k
 
 
 # --- Member builders -------------------------------------------------------
@@ -195,26 +202,31 @@ def random_member(model, k, seed=0):
     `set_member` like any explicit member. Seeded for reproducibility.
     """
     blocks = get_moe_blocks(model)
-    # Read expert count from whatever gate is currently on the block.
-    num_experts = blocks[0].gate.num_experts
+    num_experts = blocks[0].num_experts
     rng = random.Random(seed)
     return [sorted(rng.sample(range(num_experts), k)) for _ in blocks]
 
 
 def record_routing(model):
     """
-    Attach a forward hook to every router that records which experts it picked.
+    Attach a forward hook to every MoE block that records which experts it picked.
 
     Returns (handles, log):
-      - log[i] gets filled with the (seq_len, k) tensor of expert indices the
-        i-th layer's router selected on the next forward pass.
+      - log[i] gets filled with the (num_tokens, k) tensor of expert indices the
+        i-th layer selected on the next forward pass. We recompute the selection
+        from the block's returned router_logits exactly as the block does
+        (softmax -> topk with the block's current top_k), so it reflects whatever
+        member is active (masked logits included).
       - call h.remove() for each handle in handles when done.
     """
     log = {}
     handles = []
     for i, block in enumerate(get_moe_blocks(model)):
-        def hook(_module, _inputs, output, i=i):
-            # router forward returns (router_logits, router_scores, router_indices)
-            log[i] = output[2].detach().cpu()
-        handles.append(block.gate.register_forward_hook(hook))
+        def hook(module, _inputs, output, i=i):
+            # MixtralSparseMoeBlock.forward returns (final_hidden_states, router_logits)
+            router_logits = output[1]
+            probs = torch.softmax(router_logits, dim=-1)
+            _, selected = probs.topk(module.top_k, dim=-1)  # (num_tokens, top_k)
+            log[i] = selected.detach().cpu()
+        handles.append(block.register_forward_hook(hook))
     return handles, log
