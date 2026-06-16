@@ -26,6 +26,10 @@ dependencies:
       - accelerate     # Helper that places the model on CPU/GPU correctly
       - bitsandbytes   # 4-bit quantization for the real Mixtral (GPU only)
       - lm-eval        # EleutherAI eval harness - the benchmark accuracy
+      # lm-eval 0.4.12 uses TypedDict(extra_items=...) (PEP 728), so it needs a
+      # recent typing_extensions; the older one shipped on the GPU image crashed
+      # the import. Pin a floor so a fresh setup does not hit that.
+      - typing_extensions>=4.15
       - datasets       # benchmark data (pulled in by lm-eval too)
       - pyyaml         # Lets us read the YAML config files
       - jupyter        # So we can run the notebook
