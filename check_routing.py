@@ -13,9 +13,12 @@ Checks:
                   a subset of them (top-3 must contain top-2).
   3. RANK_SHIFT : ranks 2-3 per token -> exactly 2 experts, and each token's
                   single best (baseline rank-1) expert is NOT among them.
-  4. RANDOM     : the same randomly drawn set for every token, reproducible.
-  5. FIXED      : an explicit per-layer set is forced exactly.
-  6. EFFECT     : two different members give different output logits.
+  4. RANKS      : [0, 2] per token -> exactly 2 experts, containing the
+                  baseline rank-1 but NOT the baseline rank-2 (the pair member);
+                  [0] -> exactly the baseline rank-1 alone.
+  5. RANDOM     : the same randomly drawn set for every token, reproducible.
+  6. FIXED      : an explicit per-layer set is forced exactly.
+  7. EFFECT     : two different members give different output logits.
 
 Run it from the Code folder with:
 
@@ -31,6 +34,7 @@ from routing import (
     record_routing,
     topk_member,
     rank_shift_member,
+    rank_select_member,
     random_member,
 )
 
@@ -93,7 +97,32 @@ def main():
             ok = ok and len(chosen) == 2 and base_top1[layer][tok] not in chosen
     results.append(("rank_shift(1,2): 2 experts/token, excludes baseline rank-1", ok))
 
-    # --- 4. RANDOM: same drawn set for every token, reproducible ----------
+    # --- 4. RANKS: [0, 2] keeps rank-1 + rank-3; [0] keeps rank-1 alone ----
+    # Per-token baseline rank-2, to verify the pair skips it.
+    base_rank2 = {layer: idx[:, 1].tolist() for layer, idx in base_log.items()}
+
+    set_member(model, rank_select_member([0, 2]))
+    log = routing_log(model, inputs)
+    restore(model)
+    ok = True
+    for layer, idx in log.items():
+        for tok, row in enumerate(idx.tolist()):
+            chosen = set(int(e) for e in row)
+            ok = (ok and len(chosen) == 2
+                  and base_top1[layer][tok] in chosen
+                  and base_rank2[layer][tok] not in chosen)
+    results.append(("ranks([0,2]): keeps baseline rank-1, skips rank-2", ok))
+
+    set_member(model, rank_select_member([0]))
+    log = routing_log(model, inputs)
+    restore(model)
+    ok = True
+    for layer, idx in log.items():
+        for tok, row in enumerate(idx.tolist()):
+            ok = ok and set(int(e) for e in row) == {base_top1[layer][tok]}
+    results.append(("ranks([0]): exactly the baseline rank-1 expert", ok))
+
+    # --- 5. RANDOM: same drawn set for every token, reproducible ----------
     member_a = random_member(model, k=2, seed=0)
     member_b = random_member(model, k=2, seed=0)
     reproducible = member_a == member_b

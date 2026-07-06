@@ -31,6 +31,11 @@ The policies (one per member type in the plan):
   - "rank_shift" : per token, take a window of the ranking that SKIPS the top.
                    e.g. start=1, k=2 -> ranks 2-3; start=2, k=1 -> rank 3 alone.
                    This is the "rank-shifted" diversity member.
+  - "ranks"      : per token, take an ARBITRARY set of ranks, e.g. [0, 2] =
+                   each token's best expert plus its 3rd-best. Keeping rank 0
+                   anchors the member near baseline while the partner rank is
+                   the diversity knob; [0] alone isolates the top expert's
+                   contribution.
   - "fixed"      : the SAME explicit expert set for every token in the layer.
                    Used for the random-expert control (see `random_member`) and
                    for single-expert debugging.
@@ -74,6 +79,14 @@ class MemberGate(nn.Module):
         if self.kind in ("topk", "rank_shift"):
             self.k = policy["k"]
             self.start = policy.get("start", 0)  # rank offset; topk implies 0
+        elif self.kind == "ranks":
+            ranks = policy["ranks"]
+            if len(set(ranks)) != len(ranks) or not all(
+                0 <= r < num_experts for r in ranks
+            ):
+                raise ValueError(f"ranks must be distinct and in [0, {num_experts}): {ranks}")
+            # A buffer so it moves with .to(device) (same reason as forced_experts).
+            self.register_buffer("keep_ranks", torch.tensor(ranks, dtype=torch.long))
         elif self.kind == "fixed":
             # The explicit experts this layer must use, e.g. [0, 2]. A buffer so
             # it moves with .to(device) and is saved with the module.
@@ -102,6 +115,19 @@ class MemberGate(nn.Module):
                 logits.scatter_(-1, drop, NEG_INF)
             return logits
 
+        if self.kind == "ranks":
+            # Keep only the experts at the wanted ranks of each token's own
+            # ranking, mask everything else to -inf. The block's topk (with
+            # top_k = len(ranks)) then lands exactly on those experts.
+            order = torch.argsort(logits, dim=-1, descending=True)
+            # .to(): set_member builds this module on CPU while the model may
+            # live on a GPU, so the buffer must follow the logits (same as the
+            # "fixed" branch below).
+            keep = order[:, self.keep_ranks.to(logits.device)]  # (num_tokens, len(ranks))
+            masked = torch.full_like(logits, NEG_INF)
+            masked.scatter_(-1, keep, logits.gather(-1, keep))
+            return masked
+
         # "fixed": keep only the forced experts, mask everything else to -inf.
         idx = self.forced_experts.to(logits.device)
         masked = torch.full_like(logits, NEG_INF)
@@ -118,6 +144,8 @@ def _policy_top_k(policy):
     """How many experts per token this policy keeps (the block's `top_k`)."""
     if policy["kind"] in ("topk", "rank_shift"):
         return policy["k"]
+    if policy["kind"] == "ranks":
+        return len(policy["ranks"])
     return len(policy["experts"])  # "fixed"
 
 
@@ -149,6 +177,7 @@ def set_member(model, member):
     of expert indices. Examples:
       - set_member(model, topk_member(3))            # Top-3
       - set_member(model, rank_shift_member(1, 2))   # ranks 2-3
+      - set_member(model, rank_select_member([0, 2])) # ranks 1 and 3
       - set_member(model, random_member(model, 2))   # random-expert control
       - set_member(model, [[1], [3]])                # explicit, for debugging
 
@@ -191,6 +220,15 @@ def rank_shift_member(start, k):
     skipping the higher ranks. start=1, k=2 -> ranks 2-3.
     """
     return {"kind": "rank_shift", "k": k, "start": start}
+
+
+def rank_select_member(ranks):
+    """
+    Per token, exactly the experts at the given ranks of that token's own
+    gate ranking (0-indexed). rank_select_member([0, 2]) pairs each token's
+    best expert with its 3rd-best; [0] keeps the best expert alone.
+    """
+    return {"kind": "ranks", "ranks": list(ranks)}
 
 
 def random_member(model, k, seed=0):

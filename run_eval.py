@@ -31,9 +31,9 @@ from sanity_check import load_config, set_seed, load_model
 from routing import (
     set_member,
     restore,
-    topk_member,
-    rank_shift_member,
+    rank_select_member,
     random_member,
+    get_moe_blocks,
 )
 
 
@@ -42,15 +42,34 @@ def build_members(model):
     The ensemble member set. Each value is the argument to set_member (or None for
     the unmodified baseline). `role` drives the analysis: only "principled" members
     form the ensemble for the uncertainty decomposition; "control" is the random
-    baseline; "baseline" is the reference for the accuracy loss.
+    baseline; "baseline" is the reference for the accuracy loss; "anchor" appears
+    in the accuracy table but stays out of the ensemble math.
+
+    This set probes how much each token's top-ranked expert carries: the pair
+    members keep rank 1 (so they stay competent) and vary only the partner rank
+    (the diversity knob). The accuracy gradient over the partner rank, plus the
+    rank-1-only anchor, shows how performance decays as the partner walks down
+    the ranking. The first run (2026-06-16) showed that members WITHOUT rank 1
+    (rank_2_3, rank_3_4) collapse to chance, so those are not repeated here.
+
+    Member names use 1-indexed ranks (pair_1_3 = ranks 1 and 3); the code is
+    0-indexed. Pairs whose partner rank does not exist on the current model
+    (the tiny test model has only 4 experts) are skipped.
     """
-    return {
-        "top2_baseline": {"member": None,                      "role": "baseline"},
-        "top3":          {"member": topk_member(3),            "role": "principled"},
-        "rank_2_3":      {"member": rank_shift_member(1, 2),   "role": "principled"},
-        "rank_3_4":      {"member": rank_shift_member(2, 2),   "role": "principled"},
-        "random_k2":     {"member": random_member(model, 2, 0), "role": "control"},
+    num_experts = get_moe_blocks(model)[0].num_experts
+
+    members = {
+        "top2_baseline": {"member": None,                    "role": "baseline"},
+        "rank1_only":    {"member": rank_select_member([0]), "role": "anchor"},
     }
+    for partner in (3, 4, 5, 8):          # 1-indexed rank of the second expert
+        if partner <= num_experts:
+            members[f"pair_1_{partner}"] = {
+                "member": rank_select_member([0, partner - 1]),
+                "role": "principled",
+            }
+    members["random_k2"] = {"member": random_member(model, 2, 0), "role": "control"}
+    return members
 
 
 def evaluate_member(model, tokenizer, ecfg):
