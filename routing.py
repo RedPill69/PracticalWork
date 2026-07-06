@@ -36,6 +36,17 @@ The policies (one per member type in the plan):
                    anchors the member near baseline while the partner rank is
                    the diversity knob; [0] alone isolates the top expert's
                    contribution.
+  - "drop"       : remove ONE expert from the pool in every layer ("jackknife"
+                   member); the router picks its usual top_k among the rest.
+                   Tokens that did not want the dropped expert are routed
+                   exactly like the baseline, so the perturbation is dosed:
+                   it hits each token only in the layers where the dropped
+                   expert was among its top choices.
+  - "noise"      : add seeded Gaussian noise to the gate logits before the
+                   selection ("MC-router" member, the structural analogue of
+                   MC dropout). Noise is scaled relative to each token's own
+                   logit spread, so only near-tied routing decisions flip -
+                   members diverge exactly where the router is least decided.
   - "fixed"      : the SAME explicit expert set for every token in the layer.
                    Used for the random-expert control (see `random_member`) and
                    for single-expert debugging.
@@ -70,7 +81,7 @@ class MemberGate(nn.Module):
     the block (see `set_member`).
     """
 
-    def __init__(self, gate, policy, num_experts):
+    def __init__(self, gate, policy, num_experts, layer_idx=0):
         super().__init__()
         self.gate = gate  # the original nn.Linear, shared (no copy)
         self.num_experts = num_experts
@@ -79,6 +90,18 @@ class MemberGate(nn.Module):
         if self.kind in ("topk", "rank_shift"):
             self.k = policy["k"]
             self.start = policy.get("start", 0)  # rank offset; topk implies 0
+        elif self.kind == "drop":
+            expert = policy["expert"]
+            if not 0 <= expert < num_experts:
+                raise ValueError(f"expert must be in [0, {num_experts}): {expert}")
+            self.drop_expert = expert
+        elif self.kind == "noise":
+            self.sigma = policy["sigma"]
+            # One noise stream per layer: the member seed offset by the layer
+            # index, so layers do not draw identical noise. The generator is
+            # created lazily in forward, on the device the logits live on.
+            self.noise_seed = policy["seed"] * 100003 + layer_idx
+            self.generator = None
         elif self.kind == "ranks":
             ranks = policy["ranks"]
             if len(set(ranks)) != len(ranks) or not all(
@@ -115,6 +138,29 @@ class MemberGate(nn.Module):
                 logits.scatter_(-1, drop, NEG_INF)
             return logits
 
+        if self.kind == "drop":
+            # Jackknife: remove one expert from the pool; the block's topk
+            # (with the ORIGINAL top_k, see set_member) picks the best of the
+            # rest. Tokens whose top choices did not include the dropped
+            # expert are routed exactly like the baseline.
+            logits = logits.clone()
+            logits[:, self.drop_expert] = NEG_INF
+            return logits
+
+        if self.kind == "noise":
+            # MC-router: perturb the gate scores with seeded Gaussian noise
+            # before the block's topk. The noise is scaled by each token's own
+            # logit spread (std over experts), so sigma means the same thing
+            # in every layer and model: sigma=0.5 = noise at half the spread
+            # of that token's expert scores. Only near-tied decisions flip.
+            if self.generator is None or self.generator.device != logits.device:
+                self.generator = torch.Generator(device=logits.device)
+                self.generator.manual_seed(self.noise_seed)
+            noise = torch.randn(logits.shape, generator=self.generator,
+                                device=logits.device, dtype=logits.dtype)
+            spread = logits.std(dim=-1, keepdim=True)
+            return logits + self.sigma * spread * noise
+
         if self.kind == "ranks":
             # Keep only the experts at the wanted ranks of each token's own
             # ranking, mask everything else to -inf. The block's topk (with
@@ -141,11 +187,17 @@ def get_moe_blocks(model):
 
 
 def _policy_top_k(policy):
-    """How many experts per token this policy keeps (the block's `top_k`)."""
+    """
+    How many experts per token this policy keeps (the block's `top_k`).
+    None = keep the block's original top_k ("drop" and "noise" only change
+    which experts win, not how many are used).
+    """
     if policy["kind"] in ("topk", "rank_shift"):
         return policy["k"]
     if policy["kind"] == "ranks":
         return len(policy["ranks"])
+    if policy["kind"] in ("drop", "noise"):
+        return None
     return len(policy["experts"])  # "fixed"
 
 
@@ -187,12 +239,14 @@ def set_member(model, member):
     blocks = get_moe_blocks(model)
     policies = _expand_member(member, len(blocks))
 
-    for block, policy in zip(blocks, policies):
+    for i, (block, policy) in enumerate(zip(blocks, policies)):
         if not hasattr(block, "_original_gate"):
             block._original_gate = block.gate          # remember the real gate
             block._original_top_k = block.top_k        # ...and its top_k, once
-        block.gate = MemberGate(block._original_gate, policy, block.num_experts)
-        block.top_k = _policy_top_k(policy)
+        block.gate = MemberGate(block._original_gate, policy, block.num_experts,
+                                layer_idx=i)
+        k = _policy_top_k(policy)
+        block.top_k = block._original_top_k if k is None else k
 
 
 def restore(model):
@@ -229,6 +283,29 @@ def rank_select_member(ranks):
     best expert with its 3rd-best; [0] keeps the best expert alone.
     """
     return {"kind": "ranks", "ranks": list(ranks)}
+
+
+def drop_expert_member(expert):
+    """
+    Jackknife member: expert `expert` (0-indexed) is removed from every
+    layer's pool, and the router picks its usual number of experts among the
+    rest. Affects each token only in layers where that expert was among its
+    top choices, so degradation is dosed and member-specific.
+    """
+    return {"kind": "drop", "expert": expert}
+
+
+def gate_noise_member(sigma, seed=0):
+    """
+    MC-router member: seeded Gaussian noise on the gate logits, scaled by
+    sigma times each token's own logit spread. One seed = one member.
+
+    Reproducibility note: the noise stream is deterministic given (seed,
+    layer), and re-applying the member via set_member resets it, so a full
+    eval run repeats exactly. Within a run, consecutive forward passes draw
+    fresh noise (like MC dropout), so the member is stochastic per pass.
+    """
+    return {"kind": "noise", "sigma": sigma, "seed": seed}
 
 
 def random_member(model, k, seed=0):

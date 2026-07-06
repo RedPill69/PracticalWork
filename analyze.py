@@ -68,6 +68,22 @@ def per_doc(samples):
     return dists, correct
 
 
+def member_families(roles):
+    """
+    Group the "principled" members by extraction family. A role is either the
+    plain "principled" (earlier runs: one unnamed family) or
+    "principled/<family>", e.g. "principled/drop". The uncertainty
+    decomposition is computed per family, never across families, so two
+    extraction mechanisms are not mixed into one ensemble.
+    """
+    families = {}
+    for member, role in roles.items():
+        if role == "principled" or role.startswith("principled/"):
+            family = role.split("/", 1)[1] if "/" in role else "ensemble"
+            families.setdefault(family, []).append(member)
+    return families
+
+
 # --- metrics ---------------------------------------------------------------
 
 def entropy(p):
@@ -152,7 +168,8 @@ def main():
     roles = manifest["members"]
 
     baseline = next((m for m, r in roles.items() if r == "baseline"), None)
-    principled = [m for m, r in roles.items() if r == "principled"]
+    families = member_families(roles)
+    principled = [m for fam in families.values() for m in fam]
     controls = [m for m, r in roles.items() if r == "control"]
 
     # Show members in manifest order (baseline first), not filesystem order.
@@ -199,20 +216,23 @@ def main():
                 gap = acc[best_principled] - acc[ctrl]
                 print(f"  router vs random: {best_principled} - {ctrl} = {gap:+.3f}")
 
-        # Uncertainty decomposition over the principled members.
-        unc = None
-        if len(principled) >= 2:
-            dists_by_member = {m: member_dists(runs[m], task_leaves) for m in principled}
+        # Uncertainty decomposition over the principled members, per family.
+        unc = {}
+        for fam, fam_all in families.items():
+            fam_members = [m for m in fam_all if m in runs]
+            if len(fam_members) < 2:
+                continue
+            dists_by_member = {m: member_dists(runs[m], task_leaves) for m in fam_members}
             common = set.intersection(*(set(d) for d in dists_by_member.values()))
-            doc_dists = [{m: dists_by_member[m][doc] for m in principled}
+            doc_dists = [{m: dists_by_member[m][doc] for m in fam_members}
                          for doc in sorted(common)]
             if doc_dists:
                 total, aleatoric, epistemic = decompose(doc_dists)
-                unc = {"total": total, "aleatoric": aleatoric, "epistemic": epistemic}
-                print(f"  uncertainty (nats): total={total:.4f}  "
+                unc[fam] = {"total": total, "aleatoric": aleatoric, "epistemic": epistemic}
+                print(f"  uncertainty[{fam}] (nats): total={total:.4f}  "
                       f"aleatoric={aleatoric:.4f}  epistemic={epistemic:.4f}")
 
-        summary[task] = {"acc": acc, "ci": ci, "uncertainty": unc}
+        summary[task] = {"acc": acc, "ci": ci, "uncertainty": unc or None}
 
     path = os.path.join(out_dir, "summary.json")
     with open(path, "w", encoding="utf-8") as f:

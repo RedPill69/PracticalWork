@@ -41,6 +41,7 @@ import numpy as np
 
 from analyze import (
     load_runs,
+    member_families,
     choice_loglikelihoods,
     entropy,
     all_leaf_tasks,
@@ -174,7 +175,11 @@ def main():
     manifest, runs = load_runs(args.dir)
     roles = manifest["members"]
     baseline = next(m for m, r in roles.items() if r == "baseline")
-    principled = [m for m, r in roles.items() if r == "principled" and m in runs]
+    # Signals are computed per extraction family (see analyze.member_families),
+    # so ensembles of different mechanisms are never mixed.
+    families = {fam: [m for m in ms if m in runs]
+                for fam, ms in member_families(roles).items()}
+    families = {fam: ms for fam, ms in families.items() if len(ms) >= 2}
 
     leaves = all_leaf_tasks(runs)
     groups = [(g, leaves_for(g, leaves)) for g in manifest["tasks"]]
@@ -184,9 +189,11 @@ def main():
 
     out = {}
     for task, task_leaves in groups:
-        dists, gold = gather(runs, principled + [baseline], task_leaves)
-        out[task] = analyze_group(dists, gold, principled, baseline)
-        print_group(task, out[task])
+        out[task] = {}
+        for fam, fam_members in families.items():
+            dists, gold = gather(runs, fam_members + [baseline], task_leaves)
+            out[task][fam] = analyze_group(dists, gold, fam_members, baseline)
+            print_group(f"{task} [{fam}]", out[task][fam])
 
     path = os.path.join(args.dir, "auroc.json")
     with open(path, "w", encoding="utf-8") as f:

@@ -42,23 +42,28 @@ Prints the device, output shape, predicted next token, and MoE block count.
 
 `routing.py` defines routing policies that turn the model into ensemble **members**:
 
+- `drop_expert_member(e)` - "jackknife": expert `e` is removed from every layer's pool,
+  the router picks the best remaining experts. Affects a token only in layers where `e`
+  was among its top choices, so the perturbation is dosed and member-specific.
+- `gate_noise_member(sigma, seed)` - "MC-router": seeded Gaussian noise (sigma times the
+  token's own logit spread) on the gate scores. Only near-tied routing decisions flip.
 - `rank_select_member([0, 2])` - per token, exactly the experts at the given ranks of
-  its own gate ranking (0-indexed): here the best expert plus the 3rd-best. Keeping
-  rank 1 anchors the member near baseline accuracy; the partner rank is the diversity knob.
-- `rank_select_member([0])` - each token's best expert alone (how much does rank 1 carry?)
-- `topk_member(3)` - per token, the gate's 3 highest-ranked experts ("Top-3")
-- `rank_shift_member(1, 2)` - ranks 2-3 (skips the top expert entirely)
+  its own gate ranking (0-indexed); `[0]` keeps each token's best expert alone.
+- `topk_member(3)` / `rank_shift_member(1, 2)` - rank windows (top-3, ranks 2-3).
 - `random_member(model, 2, 0)` - random experts per layer (control: does the router matter?)
 - a plain list like `[[1], [3]]` - force explicit experts per layer (debugging)
 
 Mixtral is top-2, so the baseline (ranks 1-2) is the unmodified model. The member set the
-benchmark actually runs lives in `run_eval.py:build_members`: currently `top2_baseline`,
-a `rank1_only` anchor, the `pair_1_X` series (rank 1 plus partner rank X, for X in
-3, 4, 5, 8), and the `random_k2` control. The first full run showed that members without
-rank 1 (ranks 2-3, ranks 3-4) collapse to chance, so the pairs all keep rank 1 and only
-vary the partner. Apply a member with `set_member(model, member)`, undo with
-`restore(model)`; the gate softmax is renormalized over only the chosen experts.
-Verify all policies on the tiny model:
+benchmark actually runs lives in `run_eval.py:build_members`: currently the baseline plus
+two extraction families, `drop_0..7` and `noise_<sigma>_<seed>` (sigma 0.5/1.0, seeds
+0/1). Earlier scans showed each token's top-ranked expert carries the model (rank
+windows without it collapse to chance; pairing it with any partner gives near-clones),
+so these two mechanisms perturb the top choice *selectively* instead. Member roles use
+`principled/<family>` so the analysis never mixes the two mechanisms into one ensemble;
+earlier member sets (rank windows, rank-anchored pairs) are in the git history and their
+results in the dated results folders. Apply a member with `set_member(model, member)`,
+undo with `restore(model)`; the gate softmax is renormalized over only the chosen
+experts. Verify all policies on the tiny model:
 
 ```bash
 python check_routing.py
@@ -99,8 +104,9 @@ per member, **loss vs the Top-2 baseline**, the **router-vs-random** comparison,
 answered later from the same saved files.
 
 Each member has a `role` in the manifest: `baseline` (reference for the loss),
-`principled` (forms the ensemble for the uncertainty math), `anchor` (shown in the
-accuracy table, kept out of the ensemble), `control` (the random baseline). Files in
+`principled/<family>` (forms the ensemble for the uncertainty math, grouped per
+extraction family), `anchor` (shown in the accuracy table, kept out of the ensemble),
+`control` (the random baseline). Files in
 `results/` from members not in the current manifest are reported and ignored - archive
 each finished run into a dated subfolder (e.g. `results/2026-06-16_limit100/`) so runs
 never mix.
@@ -112,6 +118,7 @@ Two more scripts read the same saved eval files; both take `--dir <results folde
 ```bash
 python overlap.py          --dir results/2026-06-16_limit100
 python compare_official.py --dir results/2026-06-16_limit100
+python auroc.py            --dir results/2026-07-06_limit100
 ```
 
 `overlap.py` asks whether members fail on the SAME or on DIFFERENT questions: the
@@ -119,7 +126,10 @@ members-correct-per-doc histogram, pairwise agreement and error-set Jaccard vs t
 value expected under independent errors, and how many baseline errors each member
 rescues (vs breaks). `compare_official.py` puts our baseline next to the officially
 reported Mixtral-8x7B numbers (paper + HF leaderboard, sources in its header) and
-explains the acc vs acc_norm metric difference.
+explains the acc vs acc_norm metric difference. `auroc.py` tests whether the
+uncertainty signals actually PREDICT errors (AUROC + selective prediction, per
+extraction family), judged against the baseline's own entropy - the signal that needs
+no ensemble and that any ensemble signal must beat to be useful.
 
 ## Running the real model on a GPU (Runpod)
 

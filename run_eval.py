@@ -31,8 +31,8 @@ from sanity_check import load_config, set_seed, load_model
 from routing import (
     set_member,
     restore,
-    rank_select_member,
-    random_member,
+    drop_expert_member,
+    gate_noise_member,
     get_moe_blocks,
 )
 
@@ -40,35 +40,47 @@ from routing import (
 def build_members(model):
     """
     The ensemble member set. Each value is the argument to set_member (or None for
-    the unmodified baseline). `role` drives the analysis: only "principled" members
-    form the ensemble for the uncertainty decomposition; "control" is the random
-    baseline; "baseline" is the reference for the accuracy loss; "anchor" appears
-    in the accuracy table but stays out of the ensemble math.
+    the unmodified baseline). `role` drives the analysis: "baseline" is the
+    reference for the accuracy loss; "principled/<family>" members form the
+    ensembles for the uncertainty decomposition, grouped per family so that two
+    extraction mechanisms are never mixed into one ensemble; "control" would be
+    the random baseline and "anchor" a member shown in the accuracy table but
+    kept out of the ensemble math.
 
-    This set probes how much each token's top-ranked expert carries: the pair
-    members keep rank 1 (so they stay competent) and vary only the partner rank
-    (the diversity knob). The accuracy gradient over the partner rank, plus the
-    rank-1-only anchor, shows how performance decays as the partner walks down
-    the ranking. The first run (2026-06-16) showed that members WITHOUT rank 1
-    (rank_2_3, rank_3_4) collapse to chance, so those are not repeated here.
+    This set compares two extraction mechanisms that perturb each token's
+    TOP-ranked expert selectively. The earlier scans showed that the top-ranked
+    expert carries the model (removing it everywhere collapses accuracy to
+    chance) while swapping the low-weight partner changes little - so the
+    remaining design space is dosed perturbation of the top choice:
 
-    Member names use 1-indexed ranks (pair_1_3 = ranks 1 and 3); the code is
-    0-indexed. Pairs whose partner rank does not exist on the current model
-    (the tiny test model has only 4 experts) are skipped.
+      - drop_<e> ("jackknife"): expert e is removed from every layer's pool and
+        the router picks the best remaining experts. A token is affected only
+        in layers where e was among its top choices, so each member deviates
+        from the baseline exactly where "its" expert mattered.
+      - noise_<sigma>_<seed> ("MC-router"): seeded Gaussian noise, sigma times
+        the token's own logit spread, on the gate scores. Only near-tied
+        routing decisions flip, so members diverge where the router is least
+        decided. Two sigmas bracket the scale; two seeds per sigma give a
+        minimal ensemble each.
+
+    Deterministic members measured in earlier runs (the rank-anchored pairs,
+    the random control) are not repeated: on the identical eval subset they
+    reproduce exactly; their results live in the dated results folders.
     """
     num_experts = get_moe_blocks(model)[0].num_experts
 
-    members = {
-        "top2_baseline": {"member": None,                    "role": "baseline"},
-        "rank1_only":    {"member": rank_select_member([0]), "role": "anchor"},
-    }
-    for partner in (3, 4, 5, 8):          # 1-indexed rank of the second expert
-        if partner <= num_experts:
-            members[f"pair_1_{partner}"] = {
-                "member": rank_select_member([0, partner - 1]),
-                "role": "principled",
+    members = {"top2_baseline": {"member": None, "role": "baseline"}}
+    for e in range(num_experts):
+        members[f"drop_{e}"] = {
+            "member": drop_expert_member(e),
+            "role": "principled/drop",
+        }
+    for sigma in (0.5, 1.0):
+        for seed in (0, 1):
+            members[f"noise_{sigma}_{seed}"] = {
+                "member": gate_noise_member(sigma, seed),
+                "role": f"principled/noise{sigma}",
             }
-    members["random_k2"] = {"member": random_member(model, 2, 0), "role": "control"}
     return members
 
 

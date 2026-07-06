@@ -16,9 +16,14 @@ Checks:
   4. RANKS      : [0, 2] per token -> exactly 2 experts, containing the
                   baseline rank-1 but NOT the baseline rank-2 (the pair member);
                   [0] -> exactly the baseline rank-1 alone.
-  5. RANDOM     : the same randomly drawn set for every token, reproducible.
-  6. FIXED      : an explicit per-layer set is forced exactly.
-  7. EFFECT     : two different members give different output logits.
+  5. DROP       : the dropped expert is never selected; tokens whose baseline
+                  top-2 did not contain it are routed exactly as the baseline.
+  6. NOISE      : sigma=0 reproduces the baseline selection exactly; the same
+                  seed gives the same selection twice (fresh apply); a
+                  different seed changes the selection; always 2 experts.
+  7. RANDOM     : the same randomly drawn set for every token, reproducible.
+  8. FIXED      : an explicit per-layer set is forced exactly.
+  9. EFFECT     : two different members give different output logits.
 
 Run it from the Code folder with:
 
@@ -35,6 +40,8 @@ from routing import (
     topk_member,
     rank_shift_member,
     rank_select_member,
+    drop_expert_member,
+    gate_noise_member,
     random_member,
 )
 
@@ -122,7 +129,48 @@ def main():
             ok = ok and set(int(e) for e in row) == {base_top1[layer][tok]}
     results.append(("ranks([0]): exactly the baseline rank-1 expert", ok))
 
-    # --- 5. RANDOM: same drawn set for every token, reproducible ----------
+    # --- 5. DROP: dropped expert gone, unaffected tokens routed as baseline
+    drop = 1
+    set_member(model, drop_expert_member(drop))
+    log = routing_log(model, inputs)
+    restore(model)
+    ok = True
+    for layer, idx in log.items():
+        for tok, row in enumerate(idx.tolist()):
+            chosen = set(int(e) for e in row)
+            ok = ok and len(chosen) == 2 and drop not in chosen
+            if drop not in base_top2[layer][tok]:
+                # This token never wanted the dropped expert: identical routing.
+                ok = ok and chosen == base_top2[layer][tok]
+    results.append((f"drop({drop}): expert {drop} gone, others routed as baseline", ok))
+
+    # --- 6. NOISE: sigma=0 == baseline; same seed reproducible; seeds differ
+    set_member(model, gate_noise_member(sigma=0.0, seed=0))
+    log = routing_log(model, inputs)
+    restore(model)
+    ok = True
+    for layer, idx in log.items():
+        for tok, row in enumerate(idx.tolist()):
+            ok = ok and set(int(e) for e in row) == base_top2[layer][tok]
+    results.append(("noise(sigma=0): identical to the baseline selection", ok))
+
+    def noise_selection(sigma, seed):
+        set_member(model, gate_noise_member(sigma, seed))
+        log = routing_log(model, inputs)
+        restore(model)
+        return {layer: idx.tolist() for layer, idx in log.items()}
+
+    sel_a = noise_selection(5.0, seed=0)
+    sel_b = noise_selection(5.0, seed=0)   # fresh apply, same seed
+    sel_c = noise_selection(5.0, seed=1)
+    two_experts = all(
+        len(set(row)) == 2 for sel in (sel_a, sel_c)
+        for rows in sel.values() for row in rows
+    )
+    results.append(("noise(5.0): same seed reproduces, new seed differs, 2 experts",
+                    sel_a == sel_b and sel_a != sel_c and two_experts))
+
+    # --- 7. RANDOM: same drawn set for every token, reproducible ----------
     member_a = random_member(model, k=2, seed=0)
     member_b = random_member(model, k=2, seed=0)
     reproducible = member_a == member_b
@@ -136,7 +184,7 @@ def main():
         ok = ok and same_every_token
     results.append(("random(k=2): fixed drawn set per layer, reproducible", ok))
 
-    # --- 5. FIXED: an explicit per-layer set is forced exactly ------------
+    # --- 8. FIXED: an explicit per-layer set is forced exactly ------------
     # Tiny model = 2 layers, 4 experts.
     fixed = [[1], [3]]
     set_member(model, fixed)
@@ -148,7 +196,7 @@ def main():
         ok = ok and picked == fixed[layer]
     results.append(("fixed [[1],[3]]: forces exactly those experts", ok))
 
-    # --- 6. Effect: two different members give different outputs ----------
+    # --- 9. Effect: two different members give different outputs ----------
     set_member(model, topk_member(3))
     logits_a = forward_logits(model, inputs)
     restore(model)
