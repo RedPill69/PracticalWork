@@ -156,7 +156,13 @@ def main():
     controls = [m for m, r in roles.items() if r == "control"]
 
     # Show members in manifest order (baseline first), not filesystem order.
-    members = [m for m in roles if m in runs] + [m for m in runs if m not in roles]
+    # Eval files whose member is NOT in the manifest are leftovers from an
+    # earlier run with a different member set - report and ignore them, so two
+    # runs never silently mix in one table.
+    members = [m for m in roles if m in runs]
+    stray = sorted(m for m in runs if m not in roles)
+    if stray:
+        print(f"(ignoring stale eval files not in members.json: {', '.join(stray)})")
 
     # Iterate the tasks the manifest asked for (MMLU's subtasks aggregated into
     # one "mmlu"), plus a pooled "overall" when there is more than one task.

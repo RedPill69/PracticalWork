@@ -1,7 +1,9 @@
-# SERVER config: the real Mixtral-8x7B in 4-bit on a CUDA GPU (e.g. 1x A100 80GB).
-# This is the config for the actual Stage-1 benchmark run.
+# SERVER config: the real Mixtral-8x7B in 4-bit on a CUDA GPU. One 48 GB card
+# (e.g. RTX 6000 Ada) is enough. This is the config for the actual Stage-1
+# benchmark run. On a fresh pod, run `bash runpod_setup.sh` first (installs the
+# pinned packages and downloads the model), then:
 #
-#   huggingface-cli download mistralai/Mixtral-8x7B-v0.1   # download once
+#   python run_eval.py --config server.yaml --limit 2      # smoke run first
 #   python run_eval.py --config server.yaml                # per-member sweep
 #   python analyze.py  --config server.yaml                # final answers
 
@@ -12,8 +14,8 @@ prompt: "The capital of France is"
 model:
   model_id: mistralai/Mixtral-8x7B-v0.1
   dtype: bfloat16
-  quantization: 4bit      # nf4 + double quant; ~24GB, fits one A100 80GB
-  device: auto            # device_map="auto" is used when quantized
+  quantization: 4bit      # nf4 + double quant; ~24GB, fits one 48GB card
+  device: auto            # when quantized, the model is pinned to GPU 0 (see load_model)
 
 eval:
   # Knowledge (MMLU), science MCQ (ARC), commonsense (HellaSwag).
