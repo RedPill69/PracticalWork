@@ -62,8 +62,9 @@ def build_members(model):
       - noise_<sigma>_<seed> ("MC-router"): seeded Gaussian noise, sigma times
         the token's own logit spread, on the gate scores. Only near-tied
         routing decisions flip, so members diverge where the router is least
-        decided. Two sigmas bracket the scale; two seeds per sigma give a
-        minimal ensemble each.
+        decided. Run at sigma 1.0 (matching the frozen and sampling families,
+        so the mechanisms are compared at the same perturbation scale); two
+        seeds give a minimal ensemble.
       - frozen_<sigma>_<seed> (frozen noise): the same noise mechanism, but the
         vector is drawn once per layer and reused for every token and pass, so
         the member is a fixed, deterministic function. Comparing this family
@@ -87,7 +88,7 @@ def build_members(model):
             "member": drop_expert_member(e),
             "role": "principled/drop",
         }
-    for sigma in (0.5, 1.0):
+    for sigma in (1.0,):
         for seed in (0, 1):
             members[f"noise_{sigma}_{seed}"] = {
                 "member": gate_noise_member(sigma, seed),
