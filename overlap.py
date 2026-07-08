@@ -143,11 +143,14 @@ def main():
     members = [m for m in manifest["members"] if m in runs]
 
     # Same task grouping as analyze.py: manifest tasks (+ pooled overall).
+    # The probe_* pair has no valid correctness notion, so it is skipped here.
     leaves = all_leaf_tasks(runs)
-    groups = [(g, leaves_for(g, leaves)) for g in manifest["tasks"]]
+    groups = [(g, leaves_for(g, leaves)) for g in manifest["tasks"]
+              if not g.startswith("probe_")]
     groups = [(g, lv) for g, lv in groups if lv]
-    if len(groups) > 1:
-        groups.append(("overall", leaves))
+    benchmark_leaves = [t for t in leaves if not t.startswith("probe_")]
+    if len(groups) > 1 and benchmark_leaves:
+        groups.append(("overall", benchmark_leaves))
 
     out = {}
     for task, task_leaves in groups:

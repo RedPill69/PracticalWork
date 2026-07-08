@@ -47,6 +47,13 @@ Prints the device, output shape, predicted next token, and MoE block count.
   was among its top choices, so the perturbation is dosed and member-specific.
 - `gate_noise_member(sigma, seed)` - "MC-router": seeded Gaussian noise (sigma times the
   token's own logit spread) on the gate scores. Only near-tied routing decisions flip.
+- `frozen_noise_member(sigma, seed)` - like gate-noise, but the noise vector is drawn once
+  per layer and reused for every token and pass, so the member is a fixed, deterministic
+  function (one routing perturbation = one posterior sample).
+- `route_sample_member(temperature, seed)` - router sampling: the experts are drawn from
+  the gate's own softmax at the given temperature (Gumbel-top-k) instead of argmax, then
+  weighted by their original gate scores. T -> 0 recovers the baseline; T = 1 samples
+  the router's actual distribution.
 - `rank_select_member([0, 2])` - per token, exactly the experts at the given ranks of
   its own gate ranking (0-indexed); `[0]` keeps each token's best expert alone.
 - `topk_member(3)` / `rank_shift_member(1, 2)` - rank windows (top-3, ranks 2-3).
@@ -55,11 +62,13 @@ Prints the device, output shape, predicted next token, and MoE block count.
 
 Mixtral is top-2, so the baseline (ranks 1-2) is the unmodified model. The member set the
 benchmark actually runs lives in `run_eval.py:build_members`: currently the baseline plus
-two extraction families, `drop_0..7` and `noise_<sigma>_<seed>` (sigma 0.5/1.0, seeds
-0/1). Earlier scans showed each token's top-ranked expert carries the model (rank
+four extraction families, `drop_0..7`, `noise_<sigma>_<seed>` (sigma 0.5/1.0, seeds
+0/1), `frozen_1.0_<seed>` (seeds 0/1), and `sample_1.0_<seed>` (seeds 0/1). Earlier scans
+showed each token's top-ranked
+expert carries the model (rank
 windows without it collapse to chance; pairing it with any partner gives near-clones),
-so these two mechanisms perturb the top choice *selectively* instead. Member roles use
-`principled/<family>` so the analysis never mixes the two mechanisms into one ensemble;
+so these mechanisms perturb the top choice *selectively* instead. Member roles use
+`principled/<family>` so the analysis never mixes two mechanisms into one ensemble;
 earlier member sets (rank windows, rank-anchored pairs) are in the git history and their
 results in the dated results folders. Apply a member with `set_member(model, member)`,
 undo with `restore(model)`; the gate softmax is renormalized over only the chosen
@@ -85,6 +94,13 @@ Inside: `/member top2|top3|rank23|rank34|random|fixed <experts>`, `/quit`.
 The benchmark is a **hybrid**: the standard lm-evaluation-harness measures accuracy
 (correct task protocols, comparable numbers), and our own `analyze.py` computes the
 uncertainty decomposition from the logged per-example log-likelihoods.
+
+The task list in both configs also includes the **answerable/unanswerable probe pair**
+(`tasks/probe_hellaswag_*.yaml`, always run 0-shot): the same HellaSwag contexts, but in
+the unanswerable twin the true ending is swapped for another document's ending, so no
+offered choice is correct. `probe.py` then measures whether the uncertainty signals can
+separate "cannot know" from "merely hard" - the discrimination that plain entropy cannot
+do even in principle. The probe pair stays out of the pooled `overall` numbers.
 
 ```bash
 # 1. Run the accuracy eval once per member, saving raw results to results/
@@ -113,12 +129,13 @@ never mix.
 
 ## Post-hoc analyses (no GPU)
 
-Two more scripts read the same saved eval files; both take `--dir <results folder>`:
+These scripts read the same saved eval files; all take `--dir <results folder>`:
 
 ```bash
 python overlap.py          --dir results/2026-06-16_limit100
 python compare_official.py --dir results/2026-06-16_limit100
 python auroc.py            --dir results/2026-07-06_limit100
+python probe.py            --dir results   # needs a run that included the probe tasks
 ```
 
 `overlap.py` asks whether members fail on the SAME or on DIFFERENT questions: the

@@ -33,6 +33,8 @@ from routing import (
     restore,
     drop_expert_member,
     gate_noise_member,
+    frozen_noise_member,
+    route_sample_member,
     get_moe_blocks,
 )
 
@@ -62,6 +64,16 @@ def build_members(model):
         routing decisions flip, so members diverge where the router is least
         decided. Two sigmas bracket the scale; two seeds per sigma give a
         minimal ensemble each.
+      - frozen_<sigma>_<seed> (frozen noise): the same noise mechanism, but the
+        vector is drawn once per layer and reused for every token and pass, so
+        the member is a fixed, deterministic function. Comparing this family
+        against the fresh-noise one tests whether the per-pass stochasticity
+        (a question's answer choices see different draws) matters.
+      - sample_<T>_<seed> (router sampling): the experts are drawn from the
+        gate's own softmax at temperature T (Gumbel-top-k) instead of argmax,
+        weighted by their original gate scores. At T=1 the members are draws
+        from the distribution the router itself defines - the most principled
+        "posterior over routings" available without training.
 
     Deterministic members measured in earlier runs (the rank-anchored pairs,
     the random control) are not repeated: on the identical eval subset they
@@ -81,20 +93,55 @@ def build_members(model):
                 "member": gate_noise_member(sigma, seed),
                 "role": f"principled/noise{sigma}",
             }
+    for seed in (0, 1):
+        members[f"frozen_1.0_{seed}"] = {
+            "member": frozen_noise_member(1.0, seed),
+            "role": "principled/frozen1.0",
+        }
+    for seed in (0, 1):
+        members[f"sample_1.0_{seed}"] = {
+            "member": route_sample_member(1.0, seed),
+            "role": "principled/sample1.0",
+        }
     return members
 
 
+# Custom tasks (the answerable/unanswerable probe pair) live in tasks/ next to
+# this file; the TaskManager makes lm-eval find them in addition to its own.
+TASK_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tasks")
+
+
 def evaluate_member(model, tokenizer, ecfg):
-    """Run lm-eval for the currently-applied member and return its result dict."""
-    lm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=ecfg["batch_size"])
-    return lm_eval.simple_evaluate(
-        model=lm,
-        tasks=list(ecfg["tasks"]),
-        num_fewshot=ecfg["num_fewshot"],
-        limit=ecfg["limit"],
-        log_samples=True,     # we need the per-doc per-choice log-likelihoods
-        bootstrap_iters=0,    # we compute our own confidence intervals in analyze.py
-    )
+    """
+    Run lm-eval for the currently-applied member and return one merged result
+    dict. Standard tasks use the configured fewshot count; probe_* tasks
+    always run 0-shot - their fewshot examples would otherwise leak corrupted
+    (unanswerable) examples into the context and differ systematically
+    between the two probe variants.
+    """
+    from lm_eval.tasks import TaskManager
+    task_manager = TaskManager(include_path=TASK_DIR)
+
+    normal = [t for t in ecfg["tasks"] if not t.startswith("probe_")]
+    probes = [t for t in ecfg["tasks"] if t.startswith("probe_")]
+
+    merged = {"results": {}, "samples": {}}
+    for tasks, fewshot in ((normal, ecfg["num_fewshot"]), (probes, 0)):
+        if not tasks:
+            continue
+        lm = HFLM(pretrained=model, tokenizer=tokenizer, batch_size=ecfg["batch_size"])
+        res = lm_eval.simple_evaluate(
+            model=lm,
+            tasks=tasks,
+            num_fewshot=fewshot,
+            limit=ecfg["limit"],
+            log_samples=True,   # we need the per-doc per-choice log-likelihoods
+            bootstrap_iters=0,  # we compute our own confidence intervals in analyze.py
+            task_manager=task_manager,
+        )
+        merged["results"].update(res["results"])
+        merged["samples"].update(res["samples"])
+    return merged
 
 
 def parse_args():

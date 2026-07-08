@@ -1,0 +1,23 @@
+# Unanswerable twin of the probe pair: same contexts as the answerable twin,
+# but the true ending is swapped for another document's ending, so no offered
+# choice is correct. Reported accuracy is meaningless by design; the analysis
+# (probe.py) uses only the per-choice log-likelihoods. See probe_utils.py.
+tag:
+  - multiple_choice
+task: probe_hellaswag_unanswerable
+dataset_path: Rowan/hellaswag
+dataset_name: null
+output_type: multiple_choice
+training_split: train
+validation_split: validation
+test_split: null
+process_docs: !function probe_utils.process_docs_unanswerable
+doc_to_text: "{{query}}"
+doc_to_target: "{{label}}"
+doc_to_choice: "choices"
+metric_list:
+  - metric: acc
+    aggregation: mean
+    higher_is_better: true
+metadata:
+  version: 1.0

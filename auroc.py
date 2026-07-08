@@ -182,10 +182,12 @@ def main():
     families = {fam: ms for fam, ms in families.items() if len(ms) >= 2}
 
     leaves = all_leaf_tasks(runs)
-    groups = [(g, leaves_for(g, leaves)) for g in manifest["tasks"]]
+    groups = [(g, leaves_for(g, leaves)) for g in manifest["tasks"]
+              if not g.startswith("probe_")]   # probes: no valid correctness
     groups = [(g, lv) for g, lv in groups if lv]
-    if len(groups) > 1:
-        groups.append(("overall", leaves))
+    benchmark_leaves = [t for t in leaves if not t.startswith("probe_")]
+    if len(groups) > 1 and benchmark_leaves:
+        groups.append(("overall", benchmark_leaves))
 
     out = {}
     for task, task_leaves in groups:

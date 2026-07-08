@@ -1,0 +1,22 @@
+# Answerable twin of the probe pair: plain HellaSwag under a separate task
+# name, so it runs 0-shot alongside the corrupted twin and pairs 1:1 with it
+# on the same `limit`. See probe_utils.py for the rationale.
+tag:
+  - multiple_choice
+task: probe_hellaswag_answerable
+dataset_path: Rowan/hellaswag
+dataset_name: null
+output_type: multiple_choice
+training_split: train
+validation_split: validation
+test_split: null
+process_docs: !function probe_utils.process_docs_answerable
+doc_to_text: "{{query}}"
+doc_to_target: "{{label}}"
+doc_to_choice: "choices"
+metric_list:
+  - metric: acc
+    aggregation: mean
+    higher_is_better: true
+metadata:
+  version: 1.0

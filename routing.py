@@ -47,6 +47,20 @@ The policies (one per member type in the plan):
                    MC dropout). Noise is scaled relative to each token's own
                    logit spread, so only near-tied routing decisions flip -
                    members diverge exactly where the router is least decided.
+  - "frozen"     : like "noise", but the noise vector is drawn ONCE per layer
+                   and reused for every token and forward pass, so the member
+                   is a fixed, deterministic function (a per-layer tilt of the
+                   gate scores). The cleanest "one routing perturbation = one
+                   posterior sample" reading, and reproducible regardless of
+                   evaluation order or batch size.
+  - "sample"     : per token, SAMPLE the experts from the gate's own softmax
+                   (at a temperature) instead of taking the argmax top-k, via
+                   the Gumbel-top-k trick. temperature -> 0 recovers the
+                   baseline; temperature 1 samples from the router's actual
+                   distribution, making members draws from the posterior the
+                   router itself defines. The kept experts are then weighted
+                   by their ORIGINAL gate scores (renormalized), not by the
+                   perturbed ones.
   - "fixed"      : the SAME explicit expert set for every token in the layer.
                    Used for the random-expert control (see `random_member`) and
                    for single-expert debugging.
@@ -81,10 +95,11 @@ class MemberGate(nn.Module):
     the block (see `set_member`).
     """
 
-    def __init__(self, gate, policy, num_experts, layer_idx=0):
+    def __init__(self, gate, policy, num_experts, layer_idx=0, native_top_k=2):
         super().__init__()
         self.gate = gate  # the original nn.Linear, shared (no copy)
         self.num_experts = num_experts
+        self.native_top_k = native_top_k  # the block's unmodified top_k
         self.kind = policy["kind"]
 
         if self.kind in ("topk", "rank_shift"):
@@ -95,8 +110,12 @@ class MemberGate(nn.Module):
             if not 0 <= expert < num_experts:
                 raise ValueError(f"expert must be in [0, {num_experts}): {expert}")
             self.drop_expert = expert
-        elif self.kind == "noise":
-            self.sigma = policy["sigma"]
+        elif self.kind in ("noise", "frozen", "sample"):
+            if self.kind == "sample":
+                self.temperature = policy["temperature"]
+            else:
+                self.sigma = policy["sigma"]
+            self.frozen_eps = None  # the cached per-layer draw ("frozen" only)
             # One noise stream per layer: the member seed offset by the layer
             # index, so layers do not draw identical noise. The generator is
             # created lazily in forward, on the device the logits live on.
@@ -161,6 +180,41 @@ class MemberGate(nn.Module):
             spread = logits.std(dim=-1, keepdim=True)
             return logits + self.sigma * spread * noise
 
+        if self.kind == "frozen":
+            # Frozen-noise: the perturbation direction is drawn ONCE per
+            # (member, layer) and reused for every token and forward pass, so
+            # the member is a fixed function - a per-layer tilt of the gate
+            # scores, still scaled by each token's own logit spread like the
+            # "noise" branch. Recreating the member redraws the same vector.
+            if self.frozen_eps is None or self.frozen_eps.device != logits.device:
+                gen = torch.Generator(device=logits.device)
+                gen.manual_seed(self.noise_seed)
+                self.frozen_eps = torch.randn(
+                    (1, self.num_experts), generator=gen,
+                    device=logits.device, dtype=logits.dtype)
+            spread = logits.std(dim=-1, keepdim=True)
+            return logits + self.sigma * spread * self.frozen_eps
+
+        if self.kind == "sample":
+            # Router sampling: draw the native top_k experts WITHOUT
+            # replacement from softmax(logits / temperature) via the
+            # Gumbel-top-k trick (adding Gumbel noise and taking the top-k is
+            # exactly such a sample). Selection is perturbed, but the kept
+            # experts keep their ORIGINAL logits, so the block's softmax
+            # weights them by the true (renormalized) gate scores.
+            if self.generator is None or self.generator.device != logits.device:
+                self.generator = torch.Generator(device=logits.device)
+                self.generator.manual_seed(self.noise_seed)
+            # float32 for the Gumbel math: log of tiny bf16 uniforms is coarse.
+            u = torch.rand(logits.shape, generator=self.generator,
+                           device=logits.device, dtype=torch.float32)
+            gumbel = -torch.log(-torch.log(u.clamp_min(1e-20)))
+            scores = logits.float() / self.temperature + gumbel
+            keep = scores.topk(self.native_top_k, dim=-1).indices
+            masked = torch.full_like(logits, NEG_INF)
+            masked.scatter_(-1, keep, logits.gather(-1, keep))
+            return masked
+
         if self.kind == "ranks":
             # Keep only the experts at the wanted ranks of each token's own
             # ranking, mask everything else to -inf. The block's topk (with
@@ -196,7 +250,7 @@ def _policy_top_k(policy):
         return policy["k"]
     if policy["kind"] == "ranks":
         return len(policy["ranks"])
-    if policy["kind"] in ("drop", "noise"):
+    if policy["kind"] in ("drop", "noise", "frozen", "sample"):
         return None
     return len(policy["experts"])  # "fixed"
 
@@ -244,7 +298,7 @@ def set_member(model, member):
             block._original_gate = block.gate          # remember the real gate
             block._original_top_k = block.top_k        # ...and its top_k, once
         block.gate = MemberGate(block._original_gate, policy, block.num_experts,
-                                layer_idx=i)
+                                layer_idx=i, native_top_k=block._original_top_k)
         k = _policy_top_k(policy)
         block.top_k = block._original_top_k if k is None else k
 
@@ -302,10 +356,37 @@ def gate_noise_member(sigma, seed=0):
 
     Reproducibility note: the noise stream is deterministic given (seed,
     layer), and re-applying the member via set_member resets it, so a full
-    eval run repeats exactly. Within a run, consecutive forward passes draw
-    fresh noise (like MC dropout), so the member is stochastic per pass.
+    eval run repeats exactly - but only under the same evaluation order and
+    batch size, because each forward pass advances the stream. Within a run,
+    consecutive forward passes draw fresh noise (like MC dropout), so the
+    member is stochastic per pass.
     """
     return {"kind": "noise", "sigma": sigma, "seed": seed}
+
+
+def frozen_noise_member(sigma, seed=0):
+    """
+    Frozen-noise member: like gate_noise_member, but the noise vector is drawn
+    once per layer and reused for every token and forward pass. The member is
+    therefore a DETERMINISTIC function - a fixed per-layer tilt of the gate
+    scores (scaled by each token's own logit spread) - which makes it the
+    cleanest "one routing perturbation = one posterior sample" reading, and
+    reproducible regardless of evaluation order or batch size. One seed = one
+    member.
+    """
+    return {"kind": "frozen", "sigma": sigma, "seed": seed}
+
+
+def route_sample_member(temperature, seed=0):
+    """
+    Router-sampling member: per token, the block's native number of experts is
+    sampled (without replacement) from the gate's own softmax at the given
+    temperature, instead of taking the argmax top-k. temperature -> 0 recovers
+    the baseline exactly; temperature 1 draws from the router's actual
+    distribution. One seed = one member; same reproducibility behaviour as
+    gate_noise_member.
+    """
+    return {"kind": "sample", "temperature": temperature, "seed": seed}
 
 
 def random_member(model, k, seed=0):

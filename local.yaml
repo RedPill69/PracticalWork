@@ -19,7 +19,8 @@ model:
 
 eval:
   # Short task + tiny limit so the whole pipeline runs in seconds locally.
-  tasks: [hellaswag]
+  # The probe_* pair (tasks/) tests answerable-vs-unanswerable discrimination.
+  tasks: [hellaswag, probe_hellaswag_answerable, probe_hellaswag_unanswerable]
   num_fewshot: 0          # applied to all tasks (0 keeps prompts short for tiny)
   limit: 5                # number of examples per task (matched across members)
   batch_size: 1

@@ -184,10 +184,23 @@ def main():
     # Iterate the tasks the manifest asked for (MMLU's subtasks aggregated into
     # one "mmlu"), plus a pooled "overall" when there is more than one task.
     leaves = all_leaf_tasks(runs)
+
+    # A member whose eval file lacks tasks that other members have is a
+    # leftover from an interrupted or older run (the name-based guard above
+    # cannot catch it, because the member IS in the manifest) - warn, so a
+    # half-updated results folder never passes silently.
+    for name in members:
+        missing = [t for t in leaves if t not in runs[name]["samples"]]
+        if missing:
+            print(f"(WARNING: eval_{name}.json is missing tasks "
+                  f"{', '.join(missing)} - stale or interrupted run?)")
     groups = [(g, leaves_for(g, leaves)) for g in manifest["tasks"]]
     groups = [(g, lv) for g, lv in groups if lv]   # keep only tasks that ran
-    if len(groups) > 1:
-        groups.append(("overall", leaves))
+    # The probe_* pair is a diagnostic (probe.py), not a benchmark: keep it
+    # out of the pooled "overall" so it cannot skew the headline numbers.
+    benchmark_leaves = [t for t in leaves if not t.startswith("probe_")]
+    if len(groups) > 1 and benchmark_leaves:
+        groups.append(("overall", benchmark_leaves))
 
     summary = {}
     for task, task_leaves in groups:

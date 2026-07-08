@@ -18,15 +18,21 @@ model:
   device: auto            # when quantized, the model is pinned to GPU 0 (see load_model)
 
 eval:
-  # Knowledge (MMLU), science MCQ (ARC), commonsense (HellaSwag).
-  tasks: [mmlu, arc_challenge, hellaswag]
+  # Knowledge (MMLU), science MCQ (ARC), commonsense (HellaSwag), plus the
+  # answerable/unanswerable probe pair (tasks/, always 0-shot): does the
+  # epistemic term separate "cannot know" from "merely hard"?
+  tasks: [mmlu, arc_challenge, hellaswag,
+          probe_hellaswag_answerable, probe_hellaswag_unanswerable]
   # Applied to ALL tasks. 5 is a common choice; set per-task by running
   # separate configs if you want MMLU-5 / others-0. Relative member loss does
   # not depend on the exact shot count.
   num_fewshot: 5
-  # Subset size per task, matched across all members. Start small to time one
-  # pass, then scale up (e.g. 1000, or a fraction like 0.5 for half the set).
-  limit: 1000
+  # Subset size per task, matched across all members. 100 is the mechanism-
+  # comparison size (same subset as the June/July runs, so results stay
+  # directly comparable). Scale up deliberately (e.g. 1000) once the final
+  # member set is decided - NOTE this is per MMLU subject, so 1000 means the
+  # full ~14k MMLU set and a much longer, costlier run.
+  limit: 100
   batch_size: 4
   output_dir: results
 

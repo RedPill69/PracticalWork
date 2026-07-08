@@ -21,9 +21,16 @@ Checks:
   6. NOISE      : sigma=0 reproduces the baseline selection exactly; the same
                   seed gives the same selection twice (fresh apply); a
                   different seed changes the selection; always 2 experts.
-  7. RANDOM     : the same randomly drawn set for every token, reproducible.
-  8. FIXED      : an explicit per-layer set is forced exactly.
-  9. EFFECT     : two different members give different output logits.
+  6b. FROZEN    : sigma=0 reproduces the baseline; the selection is identical
+                  ACROSS passes within one apply (deterministic member, the
+                  property "noise" does not have); same seed reproduces after
+                  a fresh apply; a different seed differs; always 2 experts.
+  7. SAMPLE     : temperature->0 reproduces the baseline selection exactly;
+                  the same seed gives the same selection twice; a different
+                  seed changes the selection; always 2 experts.
+  8. RANDOM     : the same randomly drawn set for every token, reproducible.
+  9. FIXED      : an explicit per-layer set is forced exactly.
+ 10. EFFECT     : two different members give different output logits.
 
 Run it from the Code folder with:
 
@@ -42,6 +49,8 @@ from routing import (
     rank_select_member,
     drop_expert_member,
     gate_noise_member,
+    frozen_noise_member,
+    route_sample_member,
     random_member,
 )
 
@@ -170,7 +179,67 @@ def main():
     results.append(("noise(5.0): same seed reproduces, new seed differs, 2 experts",
                     sel_a == sel_b and sel_a != sel_c and two_experts))
 
-    # --- 7. RANDOM: same drawn set for every token, reproducible ----------
+    # --- 6b. FROZEN: sigma=0 == baseline; deterministic ACROSS passes within
+    # one apply (the property that distinguishes it from "noise"); same seed
+    # reproducible after a fresh apply; different seed differs; 2 experts.
+    set_member(model, frozen_noise_member(sigma=0.0, seed=0))
+    log = routing_log(model, inputs)
+    restore(model)
+    ok = True
+    for layer, idx in log.items():
+        for tok, row in enumerate(idx.tolist()):
+            ok = ok and set(int(e) for e in row) == base_top2[layer][tok]
+    results.append(("frozen(sigma=0): identical to the baseline selection", ok))
+
+    set_member(model, frozen_noise_member(5.0, seed=0))
+    sel_a = {layer: idx.tolist() for layer, idx in routing_log(model, inputs).items()}
+    sel_b = {layer: idx.tolist() for layer, idx in routing_log(model, inputs).items()}
+    restore(model)   # second pass WITHOUT re-applying: must match the first
+
+    def frozen_selection(sigma, seed):
+        set_member(model, frozen_noise_member(sigma, seed))
+        log = routing_log(model, inputs)
+        restore(model)
+        return {layer: idx.tolist() for layer, idx in log.items()}
+
+    sel_c = frozen_selection(5.0, seed=0)   # fresh apply, same seed
+    sel_d = frozen_selection(5.0, seed=1)
+    two_experts = all(
+        len(set(row)) == 2 for sel in (sel_a, sel_d)
+        for rows in sel.values() for row in rows
+    )
+    results.append(("frozen(5.0): deterministic across passes, same seed reproduces, "
+                    "new seed differs, 2 experts",
+                    sel_a == sel_b and sel_a == sel_c and sel_a != sel_d
+                    and two_experts))
+
+    # --- 7. SAMPLE: T->0 == baseline; same seed reproducible; seeds differ
+    set_member(model, route_sample_member(temperature=1e-4, seed=0))
+    log = routing_log(model, inputs)
+    restore(model)
+    ok = True
+    for layer, idx in log.items():
+        for tok, row in enumerate(idx.tolist()):
+            ok = ok and set(int(e) for e in row) == base_top2[layer][tok]
+    results.append(("sample(T~0): identical to the baseline selection", ok))
+
+    def sample_selection(temperature, seed):
+        set_member(model, route_sample_member(temperature, seed))
+        log = routing_log(model, inputs)
+        restore(model)
+        return {layer: idx.tolist() for layer, idx in log.items()}
+
+    sel_a = sample_selection(10.0, seed=0)
+    sel_b = sample_selection(10.0, seed=0)   # fresh apply, same seed
+    sel_c = sample_selection(10.0, seed=1)
+    two_experts = all(
+        len(set(row)) == 2 for sel in (sel_a, sel_c)
+        for rows in sel.values() for row in rows
+    )
+    results.append(("sample(10.0): same seed reproduces, new seed differs, 2 experts",
+                    sel_a == sel_b and sel_a != sel_c and two_experts))
+
+    # --- 8. RANDOM: same drawn set for every token, reproducible ----------
     member_a = random_member(model, k=2, seed=0)
     member_b = random_member(model, k=2, seed=0)
     reproducible = member_a == member_b
@@ -184,7 +253,7 @@ def main():
         ok = ok and same_every_token
     results.append(("random(k=2): fixed drawn set per layer, reproducible", ok))
 
-    # --- 8. FIXED: an explicit per-layer set is forced exactly ------------
+    # --- 9. FIXED: an explicit per-layer set is forced exactly ------------
     # Tiny model = 2 layers, 4 experts.
     fixed = [[1], [3]]
     set_member(model, fixed)
@@ -196,7 +265,7 @@ def main():
         ok = ok and picked == fixed[layer]
     results.append(("fixed [[1],[3]]: forces exactly those experts", ok))
 
-    # --- 9. Effect: two different members give different outputs ----------
+    # --- 10. Effect: two different members give different outputs ---------
     set_member(model, topk_member(3))
     logits_a = forward_logits(model, inputs)
     restore(model)
