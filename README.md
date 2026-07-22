@@ -135,7 +135,7 @@ These scripts read the same saved eval files; all take `--dir <results folder>`:
 python overlap.py          --dir results/2026-06-16_limit100
 python compare_official.py --dir results/2026-06-16_limit100
 python auroc.py            --dir results/2026-07-06_limit100
-python probe.py            --dir results   # needs a run that included the probe tasks
+python probe.py            --dir results/2026-07-22_limit100   # needs a run with the probe tasks
 ```
 
 `overlap.py` asks whether members fail on the SAME or on DIFFERENT questions: the
