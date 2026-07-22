@@ -62,9 +62,16 @@ def per_doc(samples):
     for s in samples:
         lls = choice_loglikelihoods(s)
         gold = int(s["target"])
+        correct[s["doc_id"]] = int(int(lls.argmax()) == gold)
+        if not np.isfinite(lls).all():
+            # A member can rarely emit nonfinite logits (seen once with fresh
+            # gate noise under 4-bit). Keep the doc's 0/1 correctness (lm-eval
+            # scored it too) but leave it out of the distributions, so one bad
+            # doc cannot turn a whole family's uncertainty mean into NaN; the
+            # per-family intersection then simply excludes the doc.
+            continue
         p = np.exp(lls - lls.max())
         dists[s["doc_id"]] = p / p.sum()
-        correct[s["doc_id"]] = int(int(lls.argmax()) == gold)
     return dists, correct
 
 

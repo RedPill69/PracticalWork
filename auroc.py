@@ -66,6 +66,11 @@ def gather(runs, members, leaves):
             for s in runs[m]["samples"].get(t, []):
                 key = f"{t}:{s['doc_id']}"
                 lls = choice_loglikelihoods(s)
+                if not np.isfinite(lls).all():
+                    # Same rationale as analyze.per_doc: skip the doc for this
+                    # member, and the intersection rule keeps every signal
+                    # finite instead of poisoning a family's stats with NaN.
+                    continue
                 p = np.exp(lls - lls.max())
                 dists[m][key] = p / p.sum()
                 gold[key] = int(s["target"])
